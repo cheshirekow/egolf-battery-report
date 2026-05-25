@@ -6,16 +6,40 @@ import sys
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200 # vLinker default high-speed baud rate
 
-def send_command(ser, cmd, delay=0.2):
-    """Sends a command to the vLinker and returns the cleaned response string."""
-    full_cmd = (cmd + '\r').encode('utf-8')
-    ser.write(full_cmd)
-    time.sleep(delay)
+def send_command(ser, cmd, timeout=2.0):
+    """Sends a command to the vLinker and returns the cleaned response string.
 
-    response = ser.read_all().decode('utf-8', errors='ignore')
-    # Clean up formatting strings, carriage returns, and echoes
-    cleaned = response.replace('\r', '\n').strip()
-    return cleaned
+    Reads until the ELM327 '>' ready prompt is received, or until timeout.
+    Strips the command echo (if echo is still on) and the trailing prompt.
+    """
+    ser.reset_input_buffer()
+    ser.write((cmd + '\r').encode('utf-8'))
+
+    buf = bytearray()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        chunk = ser.read(ser.in_waiting or 1)
+        if chunk:
+            buf.extend(chunk)
+            if b'>' in buf:
+                break
+
+    text = buf.decode('utf-8', errors='ignore').replace('\r', '\n')
+    # Drop the trailing '>' prompt and any whitespace around it
+    text = text.split('>', 1)[0].strip()
+    # Drop the echoed command if it appears on the first line
+    lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+    if lines and lines[0].replace(' ', '') == cmd.replace(' ', ''):
+        lines = lines[1:]
+    return '\n'.join(lines)
+
+
+def expect_ok(ser, cmd, timeout=2.0):
+    """Send an init command and abort if the device does not reply OK."""
+    resp = send_command(ser, cmd, timeout=timeout)
+    if 'OK' not in resp.upper():
+        print(f"Warning: '{cmd}' did not return OK. Got: {resp!r}")
+    return resp
 
 def main():
     print(f"Connecting to vLinker on {SERIAL_PORT}...")
@@ -28,15 +52,17 @@ def main():
         sys.exit(1)
 
     print("Initializing ELM327 / STN protocols...")
-    send_command(ser, "ATZ")      # Reset device
-    send_command(ser, "ATE0")     # Echo off
-    send_command(ser, "ATL0")     # Linefeeds off
-    send_command(ser, "ATSP6")    # Set protocol to ISO 15765-4 CAN (11 bit ID, 500 kbaud)
+    # ATZ resets the device and can take 1-2s before the banner is emitted.
+    reset_banner = send_command(ser, "ATZ", timeout=4.0)
+    print(f"Reset banner: {reset_banner!r}")
+    expect_ok(ser, "ATE0")     # Echo off
+    expect_ok(ser, "ATL0")     # Linefeeds off
+    expect_ok(ser, "ATSP6")    # Set protocol to ISO 15765-4 CAN (11 bit ID, 500 kbaud)
 
     print("\nRequesting Diagnostic Data from e-Golf Gateway...")
 
     # Set the CAN targeting ID to the Gateway module (UDS Address 0x19 / 0x7E0 variant)
-    send_command(ser, "ATSH7E0")
+    expect_ok(ser, "ATSH7E0")
 
     # 1. Query Current Energy Content (kWh)
     # 222A0A is the common VAG UDS PID for High Voltage Battery Energy Information
