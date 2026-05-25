@@ -59,10 +59,20 @@ def main():
     expect_ok(ser, "ATL0")     # Linefeeds off
     expect_ok(ser, "ATSP6")    # Set protocol to ISO 15765-4 CAN (11 bit ID, 500 kbaud)
 
-    print("\nRequesting Diagnostic Data from e-Golf Gateway...")
+    print("\nRequesting Diagnostic Data from e-Golf Battery Management module...")
 
-    # Set the CAN targeting ID to the Gateway module (UDS Address 0x19 / 0x7E0 variant)
-    expect_ok(ser, "ATSH7E0")
+    # Target the Battery Energy Control Module directly. The gateway at 0x7E0
+    # responds to UDS but does not host the HV battery DIDs (it returned
+    # 7F 22 31 / requestOutOfRange for 2A0A and 2A09). On VAG MQB platforms the
+    # high voltage battery management module typically answers at 0x7E5 (request)
+    # / 0x7ED (response).
+    expect_ok(ser, "ATSH7E5")
+
+    # Sanity-check the path with a DID every UDS-capable module supports.
+    # A positive response is "62 F1 90" followed by 17 ASCII VIN bytes.
+    print("\n--- Sanity check: reading VIN (DID F190) ---")
+    vin_resp = send_command(ser, "22 F1 90")
+    print(f"Raw Response: {vin_resp}")
 
     # 1. Query Current Energy Content (kWh)
     # 222A0A is the common VAG UDS PID for High Voltage Battery Energy Information
