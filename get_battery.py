@@ -51,20 +51,30 @@ def parse_uds_22(resp, did_hi, did_lo):
 
     Accepts both the single-frame ELM327 form ('62 02 8C AA') and the
     multi-frame form with ISO-TP length header and frame indices
-    ('014\\n0: 62 F1 90 2D 2D 2D\\n1: 2D ...'). Returns the list of data
-    bytes that follow the '62 <hi> <lo>' echo, or None if the response
-    is missing, negative (7F 22 NRC), or does not match the requested DID.
+    ('014\\n0: 62 F1 90 2D 2D 2D\\n1: 2D ...'). When a length header is
+    present we truncate to its value, which discards any CAN-frame
+    padding (e.g. trailing 'AA AA') the chip leaves in the dump for the
+    final consecutive frame. Returns the list of data bytes that follow
+    the '62 <hi> <lo>' echo, or None if the response is missing,
+    negative (7F 22 NRC), or does not match the requested DID.
     """
     if not resp:
         return None
+    declared_len = None
     hex_bytes = []
     for line in resp.split('\n'):
         line = line.strip()
         if not line:
             continue
-        # Drop a leading ISO-TP length header like "014" (3 hex digits, no spaces)
-        if ' ' not in line and len(line) <= 4:
-            continue
+        # Capture the ISO-TP length header (3 hex digits, no spaces).
+        # It tells us how many bytes of UDS payload actually belong to
+        # this message - the remainder is CAN padding.
+        if ' ' not in line and 1 <= len(line) <= 4:
+            try:
+                declared_len = int(line, 16)
+                continue
+            except ValueError:
+                pass
         # Strip a frame index prefix like "0:" / "1:"
         if ':' in line:
             line = line.split(':', 1)[1]
@@ -73,11 +83,52 @@ def parse_uds_22(resp, did_hi, did_lo):
                 hex_bytes.append(int(tok, 16))
             except ValueError:
                 pass
+    if declared_len is not None:
+        hex_bytes = hex_bytes[:declared_len]
     if len(hex_bytes) < 3 or hex_bytes[0] == 0x7F:
         return None
     if hex_bytes[0] != 0x62 or hex_bytes[1] != did_hi or hex_bytes[2] != did_lo:
         return None
     return hex_bytes[3:]
+
+
+def scan_dids_22(ser, did_hi, lo_start, lo_end, timeout=2.0):
+    """Probe service 0x22 DIDs from `did_hi`<<8 | lo_start through lo_end inclusive.
+
+    For each DID, prints one line summarizing what came back: a negative
+    response NRC, a positive response with byte count + hex dump + the
+    most useful single-value interpretations, or '(no response)' if the
+    ECU stayed silent. Intended for finding which adjacent DID actually
+    holds a value of interest when the documented one has a confusing
+    layout.
+    """
+    for lo in range(lo_start, lo_end + 1):
+        did_str = f"{did_hi:02X}{lo:02X}"
+        cmd = f"22 {did_hi:02X} {lo:02X}"
+        resp = send_command(ser, cmd, timeout=timeout)
+        if not resp:
+            print(f"  {did_str}: (no response)")
+            continue
+        toks = resp.replace('\n', ' ').split()
+        try:
+            if len(toks) >= 3 and int(toks[0], 16) == 0x7F:
+                print(f"  {did_str}: NRC 0x{int(toks[2], 16):02X}")
+                continue
+        except ValueError:
+            pass
+        data = parse_uds_22(resp, did_hi, lo)
+        if data is None:
+            print(f"  {did_str}: (unparseable) raw={resp!r}")
+            continue
+        hex_str = " ".join(f"{b:02X}" for b in data)
+        hints = []
+        if len(data) >= 2:
+            v = (data[0] << 8) | data[1]
+            hints.append(f"u16BE={v} (x2={v*2})")
+        if len(data) >= 4:
+            v32 = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
+            hints.append(f"u32BE={v32}")
+        print(f"  {did_str}: {len(data)}B {hex_str}  [{'; '.join(hints)}]")
 
 def main():
     print(f"Connecting to vLinker on {SERIAL_PORT}...")
@@ -164,68 +215,64 @@ def main():
     expect_ok(ser, "ATFCSD300000")
     expect_ok(ser, "ATFCSM1")
 
-    def _print_scaling_candidates(data):
-        """Print 2-byte BE under common VW energy-DID scalings."""
-        if len(data) < 2:
-            return
-        raw = (data[0] << 8) | data[1]
-        print(f"    raw u16 BE = {raw}")
-        print(f"      x1 Wh : {raw/1000:8.3f} kWh")
-        print(f"      x2 Wh : {raw*2/1000:8.3f} kWh   (raw in 0.5 Wh units)")
-        print(f"      x10 Wh: {raw*10/1000:8.3f} kWh  (raw in 10 Wh units)")
-        if len(data) >= 4:
-            be4 = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
-            print(f"    raw u32 BE = {be4}")
-            print(f"      x1 Wh : {be4/1000:8.3f} kWh")
-
+    # --- Maximum Energy Content (DID 2AB2) ---------------------------------
+    # 4-byte response. First u16 BE is the pack's current maximum energy in
+    # 0.5 Wh units, so raw x 2 = Wh. Scaling chosen because it lands at
+    # ~31.75 kWh on this car, matching the e-Golf's documented usable
+    # capacity. The trailing two bytes appear to be a status / flags field.
     print("\n  Maximum Energy Content (DID 2AB2):")
     mec_resp = send_command(ser, "22 2A B2", timeout=3.0)
-    print(f"    Raw Response: {mec_resp!r}")
+    print(f"    Raw Response: {mec_resp}")
     mec_data = parse_uds_22(mec_resp, 0x2A, 0xB2)
     max_kwh = None
     if mec_data and len(mec_data) >= 2:
-        _print_scaling_candidates(mec_data)
-        # Guess: raw x 2 Wh = kWh lands at ~31.75 kWh for this car, which is
-        # close to the e-Golf's documented usable capacity (~31.5 kWh) and
-        # implies SoH near 100%. Use that as the working hypothesis; flag
-        # the SoH line below as "unverified scaling".
-        be2 = (mec_data[0] << 8) | mec_data[1]
-        max_kwh = (be2 * 2) / 1000.0
-    elif mec_resp:
-        print("    (no positive response - gateway likely needs VWTP 2.0)")
+        max_kwh = ((mec_data[0] << 8) | mec_data[1]) * 2 / 1000.0
+        print(f"  Max energy: {max_kwh:.2f} kWh")
 
-    print("\n  Current Energy Content (DID 2AB8):")
-    cec_resp = send_command(ser, "22 2A B8", timeout=3.0)
-    print(f"    Raw Response: {cec_resp!r}")
-    cec_data = parse_uds_22(cec_resp, 0x2A, 0xB8)
-    if cec_data and len(cec_data) >= 2:
-        print(f"    Data bytes ({len(cec_data)}): " +
-              " ".join(f"{b:02X}" for b in cec_data))
-        _print_scaling_candidates(cec_data)
-    elif cec_resp:
-        print("    (no positive response - gateway likely needs VWTP 2.0)")
+    # --- Gateway-side pack current cross-check (DID 2AB6) ------------------
+    # 7-byte response. Bytes [4..5] hold the pack current using the same
+    # (raw - 2044) / 4 encoding as BMS DID 1E3D. Used as a sanity check
+    # that gateway and BMS agree on the current reading.
+    print("\n  Pack current cross-check (DID 2AB6):")
+    i2_resp = send_command(ser, "22 2A B6", timeout=3.0)
+    print(f"    Raw Response: {i2_resp}")
+    i2_data = parse_uds_22(i2_resp, 0x2A, 0xB6)
+    if i2_data and len(i2_data) >= 6:
+        i_gw = (((i2_data[4] << 8) | i2_data[5]) - 2044) / 4.0
+        print(f"  Pack current (gateway): {i_gw:+.2f} A")
+
+    # --- Cell-module temperatures (DID 2AB7) -------------------------------
+    # 28-byte response = 14 u16 BE values. On this car the first seven are
+    # cell-module temperature sensors in deciCelsius (raw / 10 = degC); the
+    # remaining seven come back as 0x0032 (5.0 degC) on every read and
+    # look like placeholder / unconfigured-sensor entries.
+    print("\n  Cell-module temperatures (DID 2AB7):")
+    t_resp = send_command(ser, "22 2A B7", timeout=3.0)
+    print(f"    Raw Response: {t_resp}")
+    t_data = parse_uds_22(t_resp, 0x2A, 0xB7)
+    if t_data and len(t_data) >= 14:
+        temps_c = [((t_data[2 * k] << 8) | t_data[2 * k + 1]) / 10.0
+                   for k in range(7)]
+        print("  Sensor temperatures (degC): " +
+              ", ".join(f"{t:.1f}" for t in temps_c))
+        print(f"  Min/Max/Avg: {min(temps_c):.1f} / {max(temps_c):.1f} / "
+              f"{sum(temps_c) / len(temps_c):.1f} degC")
 
     ser.close()
 
-    print("\n--- Derived Energy & SoH Notes ---")
-    if soc_gross_pct is not None:
-        usable_kwh = (soc_gross_pct / 100.0) * NOMINAL_PACK_KWH
-        print(f"Approx usable energy now (SoC x nominal): {usable_kwh:.2f} kWh "
-              f"(SoC {soc_gross_pct:.1f}% x {NOMINAL_PACK_KWH} kWh).")
+    print("\n--- Derived Summary ---")
     if max_kwh is not None:
         soh_pct = (max_kwh / NOMINAL_PACK_KWH) * 100.0
-        print(f"State of Health (gateway 2AB2 / nominal): {soh_pct:.1f} %  "
-              f"({max_kwh:.2f} kWh / {NOMINAL_PACK_KWH} kWh).")
-        print("  NOTE: 2AB2 scaling is unverified - assumed raw x 2 = Wh "
-              "(0.5 Wh units). Cross-check against the candidates printed "
-              "in the gateway probe section.")
-    else:
-        print("True State of Health was not readable on this run. The gateway")
-        print("probe above either returned no data or a negative response; on")
-        print("this car DID 2AB2 likely requires a VWTP 2.0 tunnel, which the")
-        print("stock ELM327 firmware does not implement. The closest BMS-side")
-        print("proxy is to log SoC + current over a full charge cycle and")
-        print("integrate to estimate present capacity.")
+        print(f"State of Health: {soh_pct:.1f} %  "
+              f"({max_kwh:.2f} kWh / {NOMINAL_PACK_KWH} kWh nominal)")
+    if soc_gross_pct is not None and max_kwh is not None:
+        cur_kwh = (soc_gross_pct / 100.0) * max_kwh
+        print(f"Current usable energy: {cur_kwh:.2f} kWh  "
+              f"(SoC {soc_gross_pct:.1f} % x max {max_kwh:.2f} kWh)")
+    elif soc_gross_pct is not None:
+        fallback_kwh = (soc_gross_pct / 100.0) * NOMINAL_PACK_KWH
+        print(f"Current usable energy (gateway 2AB2 missing - falling back "
+              f"to nominal): {fallback_kwh:.2f} kWh")
 
 if __name__ == "__main__":
     main()
