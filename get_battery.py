@@ -130,7 +130,56 @@ def scan_dids_22(ser, did_hi, lo_start, lo_end, timeout=2.0):
             hints.append(f"u32BE={v32}")
         print(f"  {did_str}: {len(data)}B {hex_str}  [{'; '.join(hints)}]")
 
+def read_min_max_cells(ser):
+    """Read DIDs 1E33 (max cell voltage + index) and 1E34 (min cell voltage
+    + index) from the e-Golf BMS. Requires the extended diagnostic session
+    (10 03) to be open on the current header. Returns a dict with max_v,
+    max_idx, min_v, min_idx, spread_mv, plus the raw data byte lists for
+    each so the index byte position can be eyeballed.
+    """
+    out = {}
+    for label, did_lo in (('max', 0x33), ('min', 0x34)):
+        resp = send_command(ser, f"22 1E {did_lo:02X}", timeout=1.0)
+        data = parse_uds_22(resp, 0x1E, did_lo)
+        if not data or len(data) < 2:
+            print(f"  {label} cell read failed (1E{did_lo:02X}): {resp}")
+            return None
+        out[f'{label}_v'] = ((data[0] << 8) | data[1]) / 4096.0
+        # Per OVMS notes for the VW e-Up BMS (same DID family): byte index 3
+        # is the cell number. Use it defensively only if the response is
+        # long enough.
+        out[f'{label}_idx'] = data[3] if len(data) >= 4 else None
+        out[f'{label}_raw'] = data
+    out['spread_mv'] = (out['max_v'] - out['min_v']) * 1000.0
+    return out
+
+
+def sweep_cell_voltages(ser, n_cells=88, base_did=0x1E40, refresh_every=40):
+    """Read `n_cells` consecutive cell-voltage DIDs starting at `base_did`.
+
+    Each DID returns 2 bytes after the echo; voltage = u16 BE / 4096.
+    Periodically re-enters the extended diagnostic session (10 03) to keep
+    the BMS's S3 timer from expiring midway through the sweep. Returns a
+    list of length `n_cells`, each entry either a float (volts) or None
+    on a missing/negative response.
+    """
+    voltages = []
+    for n in range(n_cells):
+        if n > 0 and n % refresh_every == 0:
+            send_command(ser, "10 03", timeout=0.5)
+        did = base_did + n
+        hi, lo = (did >> 8) & 0xFF, did & 0xFF
+        resp = send_command(ser, f"22 {hi:02X} {lo:02X}", timeout=1.0)
+        data = parse_uds_22(resp, hi, lo)
+        if data and len(data) >= 2:
+            voltages.append(((data[0] << 8) | data[1]) / 4096.0)
+        else:
+            voltages.append(None)
+    return voltages
+
+
 def main():
+    cells_flag = '--cells' in sys.argv
     print(f"Connecting to vLinker on {SERIAL_PORT}...")
     try:
         # Initialize serial connection
@@ -190,6 +239,61 @@ def main():
     if i_data and len(i_data) >= 2:
         i_pack = (((i_data[0] << 8) | i_data[1]) - 2044) / 4.0
         print(f"  Pack current: {i_pack:+.1f} A  (+ charge / - discharge)")
+
+    # --- Cell voltage balance (DIDs 1E33/1E34, optional 1E40..1E97) --------
+    # Cell-voltage DIDs are gated behind UDS extended diagnostic session
+    # (0x10 sub-function 0x03); in the default session the BMS NACKs them
+    # with 7F 22 31. The session is opened on the currently addressed ECU
+    # only (still 7E5 here) and self-expires after the S3 timer elapses
+    # (~5 s of inactivity). DID base 0x1E40 + cell-1-indexed offset, one
+    # cell per query. Source: Merkle et al., "Estimate e-Golf Battery State
+    # Using Diagnostic Data and a Digital Twin," Batteries 2021 7(1):15
+    # (MDPI/TUM-FTM); corroborated by the OVMS3 vehicle_vweup driver.
+    print("\n--- Cell voltage balance (BMS extended session) ---")
+    sess_resp = send_command(ser, "10 03", timeout=1.0)
+    print(f"  Session control (10 03): {sess_resp}")
+    if '50 03' not in sess_resp and '5003' not in sess_resp.replace(' ', ''):
+        print("  WARNING: failed to enter extended session "
+              "- cell DIDs likely to NACK")
+
+    balance = read_min_max_cells(ser)
+    if balance:
+        print(f"  Max cell: {balance['max_v']:.4f} V  "
+              f"(cell #{balance['max_idx']})  raw={balance['max_raw']}")
+        print(f"  Min cell: {balance['min_v']:.4f} V  "
+              f"(cell #{balance['min_idx']})  raw={balance['min_raw']}")
+        print(f"  Spread:   {balance['spread_mv']:.1f} mV")
+
+    if cells_flag:
+        print("\n--- Full cell-voltage sweep "
+              "(88 cells, DIDs 1E40..1E97) ---")
+        voltages = sweep_cell_voltages(ser)
+        valid = [v for v in voltages if v is not None]
+        fails = sum(1 for v in voltages if v is None)
+        if valid:
+            v_min, v_max = min(valid), max(valid)
+            v_avg = sum(valid) / len(valid)
+            print(f"  Min: {v_min:.4f} V  Max: {v_max:.4f} V  "
+                  f"Avg: {v_avg:.4f} V  Spread: {(v_max - v_min) * 1000:.1f} mV")
+        if fails:
+            print(f"  {fails}/{len(voltages)} cells did not respond")
+        print("  Per-cell voltages (cell# : V, 8 per row):")
+        for row in range(0, len(voltages), 8):
+            parts = []
+            for col in range(8):
+                idx = row + col
+                if idx >= len(voltages):
+                    break
+                v = voltages[idx]
+                cell_n = idx + 1
+                parts.append(f"{cell_n:3}:{'----- ' if v is None else f'{v:.3f}V'}")
+            print("    " + "  ".join(parts))
+    else:
+        print("  (pass --cells to add a full per-cell sweep, ~5 s slower)")
+
+    # Return to default session before the gateway probe so we don't leave
+    # the BMS in extended mode longer than necessary.
+    send_command(ser, "10 01", timeout=1.0)
 
     # --- Gateway probe over plain ISO-TP (0x710 / 0x77A) --------------------
     # The HV "current energy content" (DID 2AB8) and "maximum energy content"
