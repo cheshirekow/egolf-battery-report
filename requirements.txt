@@ -1,0 +1,8 @@
+# Runtime dependencies for the e-Golf battery report tools.
+#
+# get_battery.py (live capture over OBD-II) needs pyserial.
+# report_to_html.py (JSON -> graphical HTML) needs matplotlib.
+# report_format.py and txt_to_json.py use only the Python standard library.
+
+pyserial>=3.5
+matplotlib>=3.5

@@ -1,2 +1,5 @@
 PROMPT.md
 __pycache__
+.venv/
+# Generated graphical reports (regenerable from the committed JSON)
+*.html

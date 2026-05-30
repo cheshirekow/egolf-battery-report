@@ -67,11 +67,23 @@ pack-health snapshot in ~3 seconds (~8 with `--cells`).
 
 ## Usage
 
-Dependencies:
+### Setting up a Python environment
+
+Dependencies are listed in `requirements.txt` (`pyserial` for the live
+capture, `matplotlib` for the HTML report). The standard-library-only
+tools — `txt_to_json.py` and `report_format.py` — need nothing extra.
 
 ```bash
-pip install pyserial
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
+
+If you only want to capture data (not render HTML) you can install just
+`pip install pyserial`; if you only want to render HTML from existing
+JSON, just `pip install matplotlib`.
+
+### Capturing data from the car
 
 Plug a vLinker (or any ELM327-compatible USB adapter) into the OBD-II
 port, then:
@@ -121,6 +133,34 @@ It shares `report_format.py` (schema, ISO-TP decoding, summary math) with
 `get_battery.py`, so a live `--output-format=json` capture and a converted
 text report produce identical JSON for the same data. The three example
 captures are checked in alongside their converted `results-0N.json`.
+
+### Rendering a graphical HTML report
+
+`report_to_html.py` turns a JSON report into a single self-contained HTML
+file (all figures embedded as base64 PNGs — no external assets), suitable
+for opening in a browser or emailing. Requires `matplotlib`.
+
+```bash
+python3 report_to_html.py results-03.json                 # -> results-03.html
+python3 report_to_html.py results-03.json -o report.html
+```
+
+The report renders:
+
+- **State of Charge** as a donut gauge.
+- **State of Health** as a concern bar (red → green) with a marker at the
+  value; the percentage pill is colored by band (green ≥ 90 %, down to red
+  below 70 %).
+- **Per-cell voltages** as an annotated 8-wide grid: each cell shows its
+  voltage, colored by `|deviation from the pack mean|` — green (in
+  balance) through yellow/orange to red (out of balance) — with the
+  weakest cell (▼) and strongest cell (▲) outlined. A balanced pack reads
+  all-green, which is the correct depiction.
+- **Module temperatures** as a colored bar chart.
+- **Pack voltage / current / energy / cell spread** as summary cards.
+
+HTML output is regenerable from the committed JSON, so it isn't checked
+into the repo.
 
 ## How it was created
 
