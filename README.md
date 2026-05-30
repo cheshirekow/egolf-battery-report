@@ -82,6 +82,10 @@ python3 get_battery.py
 
 # Same plus full 88-cell voltage sweep
 python3 get_battery.py --cells
+
+# Emit a JSON object of all decoded values instead of the text report
+python3 get_battery.py --output-format=json
+python3 get_battery.py --cells --output-format=json > report.json
 ```
 
 The script assumes the adapter is at `/dev/ttyUSB0`, 115200 baud. Adjust
@@ -89,6 +93,34 @@ the constants at the top of `get_battery.py` if your setup differs.
 
 The car must be powered on (ignition on or "ready") for the BMS to
 answer.
+
+### Output formats
+
+`--output-format` accepts `txt` (default) or `json`:
+
+- **`txt`** — the human-readable report shown throughout this README.
+- **`json`** — a single JSON object (indent 2) with every decoded value,
+  written to stdout. Status/diagnostic lines go to stderr instead, so
+  `> report.json` captures clean JSON. Keys include `soc_gross_pct`,
+  `pack_voltage_v`, `pack_current_a`, `cell_balance`, `cell_voltages`
+  (only with `--cells`), `max_energy_kwh`, `state_of_health_pct`,
+  `current_usable_energy_kwh`, `module_temps_c`, and the raw
+  `gateway_2ab6_raw` bytes.
+
+### Converting existing text reports to JSON
+
+`txt_to_json.py` re-saves a previously-captured text report as the same
+JSON object, without needing the car:
+
+```bash
+python3 txt_to_json.py results-01.txt              # JSON to stdout
+python3 txt_to_json.py results-01.txt -o results-01.json
+```
+
+It shares `report_format.py` (schema, ISO-TP decoding, summary math) with
+`get_battery.py`, so a live `--output-format=json` capture and a converted
+text report produce identical JSON for the same data. The three example
+captures are checked in alongside their converted `results-0N.json`.
 
 ## How it was created
 
