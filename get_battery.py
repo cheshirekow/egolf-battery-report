@@ -328,10 +328,16 @@ def main():
     expect_ok(ser, "ATFCSM1")
 
     # --- Maximum Energy Content (DID 2AB2) ---------------------------------
-    # 4-byte response. First u16 BE is the pack's current maximum energy in
-    # 0.5 Wh units, so raw x 2 = Wh. Scaling chosen because it lands at
-    # ~31.75 kWh on this car, matching the e-Golf's documented usable
-    # capacity. The trailing two bytes appear to be a status / flags field.
+    # 4-byte response. First u16 BE x 2 = Wh (raw in 0.5 Wh units). Verified
+    # across three captures (95.6 / 47.2 / 78.4 % SoC) to be SoC-INDEPENDENT:
+    # runs at 47 % and 78 % returned byte-identical 0x4002, and the highest-
+    # SoC run returned the *lowest* value, so this is a capacity figure, not
+    # an SoC-derived one. The value is a slowly-updated BMS capacity estimate
+    # (it stepped 0x3E02 -> 0x4002 once after a deep discharge cycle, then
+    # held steady), so treat the derived SoH as a slow-moving indicator
+    # rather than a bit-stable constant. The low byte was 0x02 in all three
+    # runs (only the high byte moved), hinting it may be a separate field;
+    # both "high byte only" and "u16 x 2" land at ~31-33 kWh either way.
     print("\n  Maximum Energy Content (DID 2AB2):")
     mec_resp = send_command(ser, "22 2A B2", timeout=3.0)
     print(f"    Raw Response: {mec_resp}")
@@ -341,17 +347,21 @@ def main():
         max_kwh = ((mec_data[0] << 8) | mec_data[1]) * 2 / 1000.0
         print(f"  Max energy: {max_kwh:.2f} kWh")
 
-    # --- Gateway-side pack current cross-check (DID 2AB6) ------------------
-    # 7-byte response. Bytes [4..5] hold the pack current using the same
-    # (raw - 2044) / 4 encoding as BMS DID 1E3D. Used as a sanity check
-    # that gateway and BMS agree on the current reading.
-    print("\n  Pack current cross-check (DID 2AB6):")
+    # --- Raw gateway DID 2AB6 (layout undetermined) ------------------------
+    # Previously decoded as a "pack current cross-check" from bytes [4..5],
+    # but three captures showed bytes [4..5] are pinned at 0x07FD regardless
+    # of actual current (including a run where the BMS read -1.2 A), so they
+    # are a constant field, not current. The genuinely varying data is in
+    # bytes [0..3] (mirrored u16 pair: 120/62/109 across the three runs),
+    # which doesn't fit SoC, voltage, or current under any linear scaling we
+    # tried. Dump the raw bytes for future analysis; we already have reliable
+    # pack current from BMS DID 1E3D, so no decode is attempted here.
+    print("\n  Gateway DID 2AB6 (raw, layout undetermined):")
     i2_resp = send_command(ser, "22 2A B6", timeout=3.0)
     print(f"    Raw Response: {i2_resp}")
     i2_data = parse_uds_22(i2_resp, 0x2A, 0xB6)
-    if i2_data and len(i2_data) >= 6:
-        i_gw = (((i2_data[4] << 8) | i2_data[5]) - 2044) / 4.0
-        print(f"  Pack current (gateway): {i_gw:+.2f} A")
+    if i2_data:
+        print("    Data bytes: " + " ".join(f"{b:02X}" for b in i2_data))
 
     # --- Cell-module temperatures (DID 2AB7) -------------------------------
     # 28-byte response = 14 u16 BE values. On this car the first seven are

@@ -1,0 +1,64 @@
+Connecting to vLinker on /dev/ttyUSB0...
+Initializing ELM327 / STN protocols...
+Reset banner: 'ELM327 v2.3'
+
+Requesting Diagnostic Data from e-Golf Battery Management module...
+
+--- Fetching Gross State of Charge (DID 028C) ---
+Raw Response: 62 02 8C C4
+  SoC (gross): 78.4 %
+
+--- Fetching HV Pack Voltage (DID 1E3B) ---
+Raw Response: 62 1E 3B 05 63
+  Pack voltage: 344.8 V
+
+--- Fetching HV Pack Current (DID 1E3D) ---
+Raw Response: 62 1E 3D 07 FC
+  Pack current: +0.0 A  (+ charge / - discharge)
+
+--- Cell voltage balance (BMS extended session) ---
+  Session control (10 03): 50 03 00 32 01 F4
+  Max cell: 3.9258 V  (cell #63)  raw=[62, 208, 0, 63]
+  Min cell: 3.9158 V  (cell #32)  raw=[62, 167, 0, 32]
+  Spread:   10.0 mV
+
+--- Full cell-voltage sweep (88 cells, DIDs 1E40..1E97) ---
+  Min: 3.9160 V  Max: 3.9260 V  Avg: 3.9226 V  Spread: 10.0 mV
+  Per-cell voltages (cell# : V, 8 per row):
+      1:3.922V    2:3.924V    3:3.923V    4:3.924V    5:3.921V    6:3.922V    7:3.922V    8:3.923V
+      9:3.921V   10:3.920V   11:3.922V   12:3.922V   13:3.923V   14:3.923V   15:3.923V   16:3.922V
+     17:3.920V   18:3.924V   19:3.923V   20:3.921V   21:3.925V   22:3.924V   23:3.922V   24:3.922V
+     25:3.921V   26:3.923V   27:3.921V   28:3.922V   29:3.922V   30:3.920V   31:3.924V   32:3.916V
+     33:3.923V   34:3.923V   35:3.922V   36:3.921V   37:3.923V   38:3.923V   39:3.922V   40:3.924V
+     41:3.922V   42:3.922V   43:3.922V   44:3.923V   45:3.923V   46:3.922V   47:3.923V   48:3.924V
+     49:3.922V   50:3.923V   51:3.925V   52:3.924V   53:3.923V   54:3.922V   55:3.921V   56:3.923V
+     57:3.924V   58:3.923V   59:3.924V   60:3.925V   61:3.923V   62:3.922V   63:3.926V   64:3.925V
+     65:3.923V   66:3.920V   67:3.922V   68:3.923V   69:3.924V   70:3.922V   71:3.924V   72:3.925V
+     73:3.923V   74:3.922V   75:3.923V   76:3.924V   77:3.924V   78:3.921V   79:3.922V   80:3.923V
+     81:3.922V   82:3.922V   83:3.924V   84:3.924V   85:3.922V   86:3.922V   87:3.923V   88:3.920V
+
+--- Probing gateway over ISO-TP (request 0x710 / response 0x77A) ---
+
+  Maximum Energy Content (DID 2AB2):
+    Raw Response: 62 2A B2 40 02 04 00
+  Max energy: 32.77 kWh
+
+  Pack current cross-check (DID 2AB6):
+    Raw Response: 00A
+0: 62 2A B6 00 6D 00
+1: 6D 07 FD 01 AA AA AA
+  Pack current (gateway): +0.25 A
+
+  Cell-module temperatures (DID 2AB7):
+    Raw Response: 01F
+0: 62 2A B7 00 AA 00
+1: 71 00 99 00 72 00 8E
+2: 00 88 00 7E 00 32 00
+3: 32 00 32 00 32 00 32
+4: 00 32 00 32 AA AA AA
+  Sensor temperatures (degC): 17.0, 11.3, 15.3, 11.4, 14.2, 13.6, 12.6
+  Min/Max/Avg: 11.3 / 17.0 / 13.6 degC
+
+--- Derived Summary ---
+State of Health: 91.5 %  (32.77 kWh / 35.8 kWh nominal)
+Current usable energy: 25.69 kWh  (SoC 78.4 % x max 32.77 kWh)

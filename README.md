@@ -31,9 +31,10 @@ configuration:
 - **Maximum energy content** — DID `2AB2`. The first u16 BE × 2 = Wh
   (i.e. raw value is in 0.5 Wh units). On a healthy 2019 pack this
   lands at ~31.75 kWh, matching the documented usable capacity.
-- **Pack current cross-check** — DID `2AB6`. Uses the same
-  `(raw - 2044) / 4` encoding as BMS DID `1E3D`; useful sanity that
-  gateway and BMS agree.
+- **Gateway DID `2AB6`** — dumped raw, layout undetermined. Was
+  briefly decoded as a pack-current cross-check, but three captures
+  showed that byte field is a constant, not current (see *Experimental
+  findings*). Reliable pack current comes from BMS DID `1E3D`.
 - **Cell-module temperatures** — DID `2AB7`. 7 sensors in
   deciCelsius (`raw / 10 = °C`), plus 7 placeholder slots that always
   read 5.0 °C on this car.
@@ -41,12 +42,10 @@ configuration:
 Derived from the above:
 
 - **State of Health** = `2AB2 max energy / 35.8 kWh` (the e-Golf's
-  nominal gross capacity, per EVNotify). **Treat this as a rough
-  indicator only.** Two captures at different SoC produced different
-  `2AB2` values (88.7 % SoH at 95.6 % SoC vs. 91.5 % SoH at 47.2 %
-  SoC), so either our `× 2` scaling is wrong or `2AB2` is a dynamic
-  capacity estimate rather than a static nameplate. See *Experimental
-  findings* below.
+  nominal gross capacity, per EVNotify). A third capture confirmed
+  `2AB2` is a **slowly-updated BMS capacity estimate, independent of
+  SoC** — so SoH (~91 %) is a trustworthy slow-moving indicator, not a
+  bit-stable constant. See *Experimental findings* below.
 - **Current usable energy** = `SoC × max energy from 2AB2`. There is no
   single gateway DID that stores current energy as a flat Wh value
   (probably because VW computes it in the display layer from
@@ -139,23 +138,25 @@ directly — was largely driven by that conversation.
 
 ## Experimental findings
 
-Two full captures were taken at meaningfully different SoC to cross-
+Three full captures were taken at meaningfully different SoC to cross-
 check the decode formulas and to verify which values are static
 properties of the pack vs. dynamic readouts. The artifacts are
-[`results-01.txt`](results-01.txt) and [`results-02.txt`](results-02.txt).
+[`results-01.txt`](results-01.txt), [`results-02.txt`](results-02.txt),
+and [`results-03.txt`](results-03.txt).
 
-| signal | run 1 (`results-01.txt`) | run 2 (`results-02.txt`) |
-|---|---|---|
-| Ambient air temperature | ~80 °F (~27 °C) | ~70 °F (~21 °C) |
-| Gross SoC (DID `028C`) | 95.6 % | 47.2 % |
-| Pack voltage (DID `1E3B`) | 361.0 V | 324.2 V |
-| Pack current (DID `1E3D`) | +0.0 A (rest) | −1.2 A (12 V keep-alive) |
-| Max cell (DID `1E33`) | 4.108 V, cell #51 | 3.692 V, cell #60 |
-| Min cell (DID `1E34`) | 4.099 V, **cell #32** | 3.683 V, **cell #32** |
-| Cell-spread | 9.0 mV | 9.0 mV |
-| Max energy (DID `2AB2` × 2) | 31.75 kWh | 32.77 kWh |
-| Derived SoH | 88.7 % | 91.5 % |
-| Cell-module temps (`2AB7` mean) | 14.1 °C | 13.6 °C |
+| signal | run 1 (`results-01.txt`) | run 2 (`results-02.txt`) | run 3 (`results-03.txt`) |
+|---|---|---|---|
+| Ambient air temperature | ~80 °F (~27 °C) | ~70 °F (~21 °C) | ~65 °F (~18 °C) |
+| Gross SoC (DID `028C`) | 95.6 % | 47.2 % | 78.4 % |
+| Pack voltage (DID `1E3B`) | 361.0 V | 324.2 V | 344.8 V |
+| Pack current (DID `1E3D`) | +0.0 A (rest) | −1.2 A (12 V keep-alive) | +0.0 A (rest) |
+| Max cell (DID `1E33`) | 4.108 V, cell #51 | 3.692 V, cell #60 | 3.926 V, cell #63 |
+| Min cell (DID `1E34`) | 4.099 V, **cell #32** | 3.683 V, **cell #32** | 3.916 V, **cell #32** |
+| Cell-spread | 9.0 mV | 9.0 mV | 10.0 mV |
+| Max energy raw (`2AB2`) | `3E 02 04 00` | `40 02 04 00` | `40 02 04 00` |
+| Max energy (`2AB2` u16 × 2) | 31.75 kWh | 32.77 kWh | 32.77 kWh |
+| Derived SoH | 88.7 % | 91.5 % | 91.5 % |
+| Cell-module temps (`2AB7` mean) | 14.1 °C | 13.6 °C | 13.6 °C |
 
 ### Solid: pack-level decodes
 
@@ -168,11 +169,11 @@ changes.
 
 ### Solid: cell-spread and weak-cell identification
 
-`1E33` / `1E34` reported a 9.0 mV cell-to-cell spread in *both* runs.
-More usefully, the **minimum cell was #32 in both runs** — the same
-physical cell shows up as the laggard regardless of SoC, which is the
-exact signal you want from a balance check. Worth keeping an eye on
-over future captures to see whether the spread widens.
+`1E33` / `1E34` reported a 9–10 mV cell-to-cell spread in all three
+runs. More usefully, the **minimum cell was #32 in all three runs** —
+the same physical cell shows up as the laggard regardless of SoC,
+which is the exact signal you want from a balance check. The spread is
+small and healthy; #32 is the cell to watch over future captures.
 
 ### Resolved: per-cell sweep encoding
 
@@ -186,52 +187,69 @@ V_volts = (u16 BE raw / 1000) + 1.0
 ```
 
 i.e. the raw value is millivolts above a 1.0 V baseline. Cross-SoC
-consistency check:
+consistency check (verified across all three captures):
 
 | SoC | sweep avg as `/4096` | implied raw (u16 BE) | + 1000 mV | aggregate `1E33`/`1E34` actual |
 |---|---|---|---|---|
 | 95.6 % | 0.7582 V | 3105 | 4.105 V | 4.099 – 4.108 V |
+| 78.4 % | (post-fix) | — | 3.923 V | 3.916 – 3.926 V |
 | 47.2 % | 0.6566 V | 2690 | 3.690 V | 3.683 – 3.692 V |
 
-The sweep's reported "spread" in raw counts (9 LSBs) also matches the
-9.0 mV reported by `1E33` / `1E34`. The fix is committed; the per-cell
-sweep now produces real volts.
+The sweep's reported "spread" in raw counts also matches `1E33` /
+`1E34`. The fix is committed; the per-cell sweep now produces real
+volts, and the run-3 sweep average (3.923 V) lands squarely between
+the aggregate min/max, confirming the formula at a third SoC.
 
-### Unresolved: DID `2AB2` is not static
+### Resolved: DID `2AB2` is a SoC-independent capacity estimate
 
-Expected `2AB2` (Maximum Energy Content) to stay constant across runs.
-It didn't:
+The first two captures showed `2AB2` moving (31.75 → 32.77 kWh), which
+left open whether the `× 2` scaling was wrong or the value was dynamic.
+The third capture settled it:
 
-- Run 1: raw bytes `3E 02 04 00` → 15874 × 2 = **31.75 kWh**
-- Run 2: raw bytes `40 02 04 00` → 16386 × 2 = **32.77 kWh**
+- Run 1 (95.6 % SoC): raw `3E 02 04 00` → **31.75 kWh**
+- Run 2 (47.2 % SoC): raw `40 02 04 00` → **32.77 kWh**
+- Run 3 (78.4 % SoC): raw `40 02 04 00` → **32.77 kWh**
 
-The trailing two bytes (`04 00`) were identical, so the change is
-entirely in the first u16. A 3.2 % change between two same-day
-captures rules out genuine pack degradation, leaving two candidate
-explanations:
+Runs 2 and 3 are **byte-identical** despite a 31-point SoC difference,
+and the highest-SoC run (run 1) returned the *lowest* value — so `2AB2`
+is **not** SoC-derived. The most consistent explanation is that it's a
+slowly-updated BMS capacity estimate: it stepped up once (`3E02` →
+`4002`) after the deep discharge between runs 1 and 2 gave the
+estimator a long sweep to recalibrate against, then held steady. So the
+derived **SoH (~91 %) is a trustworthy slow-moving indicator**, just
+not a bit-stable nameplate.
 
-1. **The `× 2` scaling is wrong.** Some other interpretation of the
-   four bytes might land on a value that is truly static across runs.
-2. **`2AB2` is a continuously-updated capacity estimate**, not a
-   static nameplate. Many BMS implementations re-estimate pack capacity
-   online based on coulomb counting and cell behavior; a few percent
-   of motion between captures is normal for such a value.
+One refinement for future scaling work: the `2AB2` low byte was `0x02`
+in all three runs — only the high byte moved (`3E → 40 → 40`). That
+hints the energy may live in the high byte alone with the low byte as a
+flags field. Both "high byte only" and "u16 × 2" land at ~31–33 kWh, so
+it doesn't change the SoH conclusion, but it's the thread to pull if a
+more precise value is ever needed.
 
-The reported "State of Health" in the script's summary is therefore a
-soft indicator only. Until we have a third sample (or an ODIS-E cross-
-reference), we cannot distinguish "scaling wrong" from "value is
-dynamic."
+### Resolved: the gateway `2AB6` "current cross-check" was decoding a constant
 
-### Unresolved: BMS and gateway pack-current disagree
+Earlier the gateway DID `2AB6` was decoded as a pack-current cross-check
+from bytes [4..5]. Three captures killed that interpretation:
 
-At rest (run 1) BMS `1E3D` and gateway `2AB6` agreed within the
-encoding's 0.25 A quantization: BMS `+0.0 A`, gateway `+0.25 A`.
+| run | BMS `1E3D` | `2AB6` bytes [4..5] | decoded "current" |
+|---|---|---|---|
+| 1 | +0.0 A | `07 FD` | +0.25 A |
+| 2 | −1.2 A | `07 FD` | +0.25 A |
+| 3 | +0.0 A | `07 FD` | +0.25 A |
 
-In run 2 the same two DIDs read **−1.2 A** (BMS, discharge) and
-**+0.25 A** (gateway, charge) at the same moment. A ~1.5 A spread
-with opposite signs is suspicious — likely a sign-convention
-difference between the two ECUs, but we can't rule out a decoded-byte-
-offset error on `2AB6` without further data.
+Bytes [4..5] are pinned at `0x07FD` regardless of actual current —
+including run 2, where the BMS clearly read −1.2 A — so they are a
+constant field, not current. The earlier apparent "agreement" at rest
+was a coincidence, and the apparent "disagreement" in run 2 was an
+artifact of decoding the wrong (constant) field. There was never a real
+gateway current reading to reconcile.
+
+The genuinely varying data in `2AB6` is bytes [0..3], a mirrored u16
+pair reading 120 / 62 / 109 across the three runs. That doesn't fit
+SoC, pack voltage, or current under any linear scaling tried, so its
+meaning is still unknown. The script now just dumps `2AB6` raw; reliable
+pack current already comes from BMS DID `1E3D` (whose sign convention
+run 2 confirmed: negative = discharge).
 
 ## References
 
@@ -281,39 +299,27 @@ Specifications:
 
 ## Future Work
 
-### Nail down DID `2AB2`
+### Pin down `2AB2` scaling precisely (optional)
 
-The biggest open question. Two captures gave 31.75 kWh and 32.77 kWh
-for what should be max energy. Three ways forward:
+The three captures established that `2AB2` is a SoC-independent capacity
+estimate (~32 kWh, ~91 % SoH) — see *Experimental findings*. What's
+left is only the exact scaling: the constant low byte (`0x02`) suggests
+the value may be high-byte-only rather than `u16 × 2`, and an ODIS-E
+session capture showing VW's own "Maximum Energy Content" alongside the
+raw `2AB2` bytes would settle it. Not urgent — both interpretations
+land within ~1 kWh.
 
-- **More data points.** A third capture at, say, 70 % SoC would tell
-  us whether `2AB2` tracks SoC, tracks temperature, or moves
-  semi-randomly between drives. The two-point dataset is not enough to
-  distinguish.
-- **Investigate scaling alternatives.** The trailing bytes (`04 00`)
-  are constant across the two captures, so they aren't part of the
-  changing value. But the leading u16 could be in some unit other
-  than 0.5 Wh — anything that lands on a static value across SoC
-  would be a candidate. Worth trying a few interpretations against
-  the existing two raw byte samples.
-- **ODIS-E cross-reference.** If anyone has access to a session
-  capture from VW's official tester showing "Maximum Energy Content"
-  alongside the raw `2AB2` bytes, that would settle the scaling
-  immediately.
+### Identify the varying `2AB6` field
 
-### Investigate the BMS / gateway pack-current mismatch
-
-`1E3D` (BMS) and `2AB6` (gateway) read `−1.2 A` and `+0.25 A` in
-run 2. Likely a sign-convention difference between the two ECUs, but
-to confirm we need either a third capture at clearly non-zero current
-or a closer look at the `2AB6` byte layout. If the gateway is using
-the same `(raw - 2044) / 4` encoding but with the opposite sign
-convention, flipping the sign on the gateway decode would make them
-agree.
+`2AB6` bytes [0..3] are a mirrored u16 pair that read 120 / 62 / 109
+across the three captures but don't fit SoC, voltage, or current under
+any linear scaling tried. The script dumps it raw. More captures (ideally
+during charge/discharge at known current) might reveal what it tracks.
+Low priority — we already have everything useful from other DIDs.
 
 ### Track cell #32 over time
 
-Cell #32 has now been the weakest cell in both captures. Worth
+Cell #32 has now been the weakest cell in **all three** captures. Worth
 checking on subsequent captures to see whether its spread vs. the
 mean grows. The 88-cell sweep makes that easy now that the encoding
 is fixed.
