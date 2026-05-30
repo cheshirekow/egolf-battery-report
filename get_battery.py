@@ -157,11 +157,19 @@ def read_min_max_cells(ser):
 def sweep_cell_voltages(ser, n_cells=88, base_did=0x1E40, refresh_every=40):
     """Read `n_cells` consecutive cell-voltage DIDs starting at `base_did`.
 
-    Each DID returns 2 bytes after the echo; voltage = u16 BE / 4096.
-    Periodically re-enters the extended diagnostic session (10 03) to keep
-    the BMS's S3 timer from expiring midway through the sweep. Returns a
-    list of length `n_cells`, each entry either a float (volts) or None
-    on a missing/negative response.
+    Each DID returns 2 bytes after the echo. Encoding (empirically
+    determined from two captures at 95.6 % and 47.2 % SoC): the u16 BE
+    raw value is millivolts above a 1.0 V baseline, so
+    `V = (raw / 1000) + 1.0`. This differs from the aggregate min/max
+    DIDs (1E33 / 1E34), which use the more familiar `raw / 4096`
+    encoding. The decoded values for the two runs lined up exactly with
+    the min/max readings under this formula, and the per-sweep spread
+    (9 mV in raw counts) matched 1E33 / 1E34's reported spread.
+
+    Periodically re-enters the extended diagnostic session (10 03) to
+    keep the BMS's S3 timer from expiring midway through the sweep.
+    Returns a list of length `n_cells`, each entry either a float
+    (volts) or None on a missing / negative response.
     """
     voltages = []
     for n in range(n_cells):
@@ -172,7 +180,7 @@ def sweep_cell_voltages(ser, n_cells=88, base_did=0x1E40, refresh_every=40):
         resp = send_command(ser, f"22 {hi:02X} {lo:02X}", timeout=1.0)
         data = parse_uds_22(resp, hi, lo)
         if data and len(data) >= 2:
-            voltages.append(((data[0] << 8) | data[1]) / 4096.0)
+            voltages.append(((data[0] << 8) | data[1]) / 1000.0 + 1.0)
         else:
             voltages.append(None)
     return voltages
